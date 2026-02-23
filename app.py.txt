@@ -1,0 +1,254 @@
+import streamlit as st
+import sqlite3
+import datetime
+import hashlib
+import os
+
+# --- 1. MODO PRODUCCIÓN (OCULTAR MENÚS Y FOOTERS) ---
+# Este bloque de CSS elimina el menú de hamburguesa, el footer y los enlaces de edición
+st.markdown("""
+<style>
+    /* Ocultar el menú hamburguesa de arriba a la derecha */
+    #MainMenu {visibility: hidden;}
+    
+    /* Ocultar el footer de "Made with Streamlit" */
+    footer {visibility: hidden;}
+    
+    /* Ocultar el header donde sale el título si usas uno propio en el body */
+    header {visibility: hidden;}
+    
+    /* Asegurar que la app use todo el ancho y alto posible */
+    .stApp { bottom: 0; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="Merka 4.0",
+    page_icon="✂️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- FOOTER PERSONALIZADO (SOFTWARE MERKA 4.0) ---
+def mostrar_footer():
+    st.markdown("""
+        <style>
+        .custom-footer {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            background-color: #1a1a1a;
+            color: #888;
+            text-align: center;
+            padding: 8px;
+            font-size: 0.8rem;
+            border-top: 2px solid #ff4b4b; /* Un toque de color marca */
+            z-index: 999;
+            font-family: sans-serif;
+        }
+        </style>
+        <div class="custom-footer">
+            Software Merka 4.0 &nbsp;|&nbsp; Soporte: +506 6449 8045
+        </div>
+    """, unsafe_allow_html=True)
+
+# --- BASE DE DATOS ---
+def get_db_connection():
+    conn = sqlite3.connect('barberia.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row 
+    return conn
+
+def init_db():
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS servicios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT, precio REAL, comision REAL
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS barberos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT, rol TEXT
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente TEXT, whatsapp TEXT, barbero_id INTEGER,
+            total REAL, propina REAL, fecha TEXT, metodo_pago TEXT,
+            FOREIGN KEY(barbero_id) REFERENCES barberos(id)
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS detalles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER, servicio TEXT, precio REAL
+        )''')
+
+        c.execute("PRAGMA table_info(tickets)")
+        columns = [info[1] for info in c.fetchall()]
+        if 'whatsapp' not in columns:
+            c.execute("ALTER TABLE tickets ADD COLUMN whatsapp TEXT")
+
+        c.execute("SELECT count(*) FROM servicios")
+        if c.fetchone()[0] == 0:
+            servicios_def = [
+                ("Corte Clásico", 150, 50),
+                ("Barba Express", 100, 50),
+                ("Premium (Corte+Barba)", 300, 60),
+                ("Producto: Pomada", 200, 20)
+            ]
+            c.executemany("INSERT INTO servicios (nombre, precio, comision) VALUES (?, ?, ?)", servicios_def)
+
+        c.execute("SELECT count(*) FROM barberos")
+        if c.fetchone()[0] == 0:
+            c.execute("INSERT INTO barberos (nombre, rol) VALUES ('Juan', 'Barbero')")
+            c.execute("INSERT INTO barberos (nombre, rol) VALUES ('Dueño', 'Admin')")
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error DB: {e}")
+
+# --- SISTEMA DE LOGIN ---
+def login():
+    # Usamos columns para centrar el login
+    col1, col2, col3 = st.columns([1,2,1])
+    
+    with col2:
+        st.markdown("<h2 style='text-align: center; color: white;'>Software Merka 4.0</h2>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            submit = st.form_submit_button("INGRESAR", use_container_width=True)
+            
+            if submit:
+                # Validación simple para producción (en un futuro real esto se encripta en BD)
+                if username == "admin" and password == "1234":
+                    st.session_state['logged_in'] = True
+                    st.session_state['role'] = 'Admin'
+                    st.rerun()
+                elif username == "barbero" and password == "1234":
+                    st.session_state['logged_in'] = True
+                    st.session_state['role'] = 'Barbero'
+                    st.rerun()
+                else:
+                    st.error("Acceso denegado")
+
+# --- APP PRINCIPAL ---
+def main_app():
+    init_db()
+
+    # Sidebar más limpio
+    with st.sidebar:
+        st.markdown("### ✂️ Menú")
+        st.write(f"Usuario: **{st.session_state['role']}**")
+        st.markdown("---")
+        
+        if st.button("📝 Nueva Venta", use_container_width=True):
+            st.session_state.view = 'Venta'
+        if st.button("📊 Monitor Dueño", use_container_width=True):
+            st.session_state.view = 'Monitor'
+        
+        st.markdown("---")
+        if st.button("Cerrar Sesión", use_container_width=True):
+            st.session_state['logged_in'] = False
+            st.rerun()
+
+    if 'view' not in st.session_state: st.session_state.view = 'Venta'
+
+    if st.session_state.view == 'Venta':
+        pantalla_venta()
+    elif st.session_state.view == 'Monitor':
+        if st.session_state['role'] == 'Admin': pantalla_monitor()
+        else: st.warning("Solo administradores.")
+
+    mostrar_footer()
+
+# --- PANTALLA VENTA ---
+def pantalla_venta():
+    st.markdown("### ✂️ Registrar Venta")
+    try:
+        conn = get_db_connection()
+        barberos = conn.execute("SELECT * FROM barberos WHERE rol != 'Admin'").fetchall()
+        servicios = conn.execute("SELECT * FROM servicios").fetchall()
+
+        with st.form("form_venta"):
+            c1, c2 = st.columns(2)
+            with c1: cliente = st.text_input("Nombre Cliente")
+            with c2: whatsapp = st.text_input("WhatsApp (+506)")
+            
+            nombres_barberos = [b['nombre'] for b in barberos] if barberos else ["N/A"]
+            barbero_sel = st.selectbox("Barbero", nombres_barberos, disabled=not barberos)
+            
+            nombres_servicios = [s['nombre'] for s in servicios] if servicios else []
+            servicios_sel = st.multiselect("Servicios", nombres_servicios, disabled=not servicios)
+            
+            c3, c4 = st.columns(2)
+            with c3: propina = st.number_input("Propina", min_value=0.0, step=10.0)
+            with c4: metodo_pago = st.selectbox("Pago", ["Efectivo", "Tarjeta", "Sinpe"])
+            
+            if st.form_submit_button("COBRAR", use_container_width=True, type="primary"):
+                if cliente and servicios_sel:
+                    total = 0
+                    b_id = next((b['id'] for b in barberos if b['nombre'] == barbero_sel), None)
+                    fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO tickets (cliente, whatsapp, barbero_id, total, propina, fecha, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (cliente, whatsapp, b_id, 0, propina, fecha, metodo_pago))
+                    t_id = cur.lastrowid
+                    
+                    for s_nom in servicios_sel:
+                        s_dat = next(s for s in servicios if s['nombre'] == s_nom)
+                        total += s_dat['precio']
+                        cur.execute("INSERT INTO detalles (ticket_id, servicio, precio) VALUES (?, ?, ?)", (t_id, s_nom, s_dat['precio']))
+                    
+                    cur.execute("UPDATE tickets SET total = ? WHERE id = ?", (total + propina, t_id))
+                    conn.commit()
+                    st.success("Venta guardada")
+                    st.rerun()
+                else:
+                    st.error("Datos incompletos")
+    except Exception as e:
+        st.error(e)
+
+# --- PANTALLA MONITOR ---
+def pantalla_monitor():
+    st.markdown("### 📊 Monitor en Tiempo Real")
+    try:
+        conn = get_db_connection()
+        fecha = st.date_input("Fecha", datetime.date.today())
+        res = conn.execute("SELECT t.id, t.cliente, b.nombre, t.total, t.metodo_pago FROM tickets t JOIN barberos b ON t.barbero_id = b.id WHERE DATE(t.fecha) = ? ORDER BY t.fecha DESC", (str(fecha),)).fetchall()
+        
+        total_caja = sum(r['total'] for r in res)
+        col1, col2 = st.columns(2)
+        col1.metric("Caja Total", f"${total_caja}")
+        col2.metric("Tickets", len(res))
+        
+        for r in res:
+            with st.expander(f"Ticket #{r['id']} - {r['cliente']}"):
+                st.write(f"Barbero: {r['nombre']} | Total: ${r['total']} | {r['metodo_pago']}")
+    except Exception as e:
+        st.error(e)
+
+# --- EJECUCIÓN ---
+if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+
+# Fondo oscuro profesional para toda la app
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0e1117;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+if st.session_state['logged_in']:
+    main_app()
+else:
+    login()
